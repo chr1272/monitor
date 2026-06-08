@@ -26,6 +26,16 @@ import {
   YAxis,
 } from 'recharts'
 import { auth, db, firebaseEnvErrors } from './firebase'
+import {
+  getInitialLanguage,
+  getTimeRangeOptions,
+  LANGUAGE_LOCALES,
+  LANGUAGE_OPTIONS,
+  LANGUAGE_STORAGE_KEY,
+  TRANSLATIONS,
+  type Language,
+  type Translation,
+} from './i18n'
 
 type Connectivity = 'Online' | 'Offline' | 'Unknown'
 
@@ -92,54 +102,43 @@ type TimeRangeOption = {
   label: string
 }
 
-function describeAuthError(error: unknown): string {
+function describeAuthError(error: unknown, translation: Translation): string {
   if (error && typeof error === 'object') {
     const code = 'code' in error && typeof error.code === 'string' ? error.code : null
     const message = 'message' in error && typeof error.message === 'string' ? error.message : null
 
     switch (code) {
       case 'auth/popup-closed-by-user':
-        return 'Sign-in popup was closed before login completed.'
+        return translation.authErrors.popupClosed
       case 'auth/popup-blocked':
-        return 'Popup was blocked by the browser. Allow popups for this site and try again.'
+        return translation.authErrors.popupBlocked
       case 'auth/unauthorized-domain':
-        return 'This domain is not authorized in Firebase Auth. Add monitor.pixelking.io to Authorized domains.'
+        return translation.authErrors.unauthorizedDomain
       case 'auth/operation-not-allowed':
-        return 'Google sign-in is not enabled in Firebase Authentication -> Sign-in method.'
+        return translation.authErrors.operationNotAllowed
       case 'auth/invalid-api-key':
-        return 'Firebase API key is invalid. Check VITE_FIREBASE_API_KEY in your GitHub secrets.'
+        return translation.authErrors.invalidApiKey
       default:
         if (code && message) {
           return `${message} (${code})`
         }
         if (code) {
-          return `Authentication failed (${code}).`
+          return `${translation.authErrors.failed} (${code})`
         }
         if (message) {
           return message
         }
     }
   }
-  return 'Authentication failed. Please check Firebase Auth settings and try again.'
+  return translation.authErrors.failed
 }
 
-const telemetryMetrics: MetricDefinition[] = [
-  { key: 'temp', label: 'Temperature', color: '#0f766e', unit: '°C' },
-  { key: 'hum', label: 'Humidity', color: '#2563eb', unit: '%' },
-  { key: 'pres', label: 'Pressure', color: '#f97316', unit: 'hPa' },
-  { key: 'gas', label: 'Gas', color: '#be123c', unit: 'kΩ' },
-  { key: 'laeq1m', label: 'LAeq, 1m', color: '#7c3aed', unit: 'dBA' },
-]
-
-const timeRangeOptions: TimeRangeOption[] = [
-  { key: 'all', label: 'All loaded records' },
-  { key: 'last7Days', label: 'Last 7 days' },
-  { key: 'last24Hours', label: 'Last 24 h' },
-  { key: 'last6Hours', label: 'Last 6 h' },
-  { key: 'thisWeek', label: 'This week' },
-  { key: 'lastWeek', label: 'Last week' },
-  { key: 'today', label: 'Today' },
-  { key: 'yesterday', label: 'Yesterday' },
+const telemetryMetrics: Omit<MetricDefinition, 'label'>[] = [
+  { key: 'temp', color: '#0f766e', unit: '°C' },
+  { key: 'hum', color: '#2563eb', unit: '%' },
+  { key: 'pres', color: '#f97316', unit: 'hPa' },
+  { key: 'gas', color: '#be123c', unit: 'kΩ' },
+  { key: 'laeq1m', color: '#7c3aed', unit: 'dBA' },
 ]
 
 function readNumber(data: DocumentData, keys: string[]): number | null {
@@ -257,14 +256,13 @@ function readStatus(data: DocumentData | undefined, keys: string[]): Connectivit
   return 'Unknown'
 }
 
-const CET_LOCALE = 'de-DE'
 const CET_TZ = 'Europe/Berlin'
 
-function formatTime(input: Date | null): string {
+function formatTime(input: Date | null, locale: string, notAvailable: string): string {
   if (!input) {
-    return 'N/A'
+    return notAvailable
   }
-  return input.toLocaleTimeString(CET_LOCALE, {
+  return input.toLocaleTimeString(locale, {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
@@ -272,17 +270,17 @@ function formatTime(input: Date | null): string {
   })
 }
 
-function formatDateTime(input: Date | null): string {
+function formatDateTime(input: Date | null, locale: string, notAvailable: string): string {
   if (!input) {
-    return 'N/A'
+    return notAvailable
   }
-  const date = input.toLocaleDateString(CET_LOCALE, {
+  const date = input.toLocaleDateString(locale, {
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
     timeZone: CET_TZ,
   })
-  const time = formatTime(input)
+  const time = formatTime(input, locale, notAvailable)
   return `${date} ${time}`
 }
 
@@ -433,9 +431,9 @@ function getTimeAxisTicks(points: TelemetryPoint[]): number[] {
   return ticks
 }
 
-function formatMetricValue(value: number | null, unit: string): string {
+function formatMetricValue(value: number | null, unit: string, notAvailable: string): string {
   if (value === null) {
-    return 'N/A'
+    return notAvailable
   }
   return `${value.toFixed(2)} ${unit}`
 }
@@ -450,6 +448,7 @@ function formatAxisValue(value: number, unit: string): string {
 
 function formatTooltipValue(
   value: number | string | ReadonlyArray<number | string> | null | undefined,
+  notAvailable: string,
 ): string {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value.toFixed(2)
@@ -460,7 +459,7 @@ function formatTooltipValue(
       .join(', ')
   }
   if (value === null || value === undefined) {
-    return 'N/A'
+    return notAvailable
   }
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed.toFixed(2) : String(value)
@@ -473,9 +472,20 @@ type MetricChartProps = {
   telemetry: TelemetryPoint[]
   latestPoint: TelemetryPoint | null
   fontSize: number
+  locale: string
+  translation: Translation
+  timeRangeOptions: TimeRangeOption[]
 }
 
-function MetricChart({ metric, telemetry, latestPoint, fontSize }: MetricChartProps) {
+function MetricChart({
+  metric,
+  telemetry,
+  latestPoint,
+  fontSize,
+  locale,
+  translation,
+  timeRangeOptions,
+}: MetricChartProps) {
   const [selectedRange, setSelectedRange] = useState<TimeRangeKey>('last24Hours')
   const [zoomWindow, setZoomWindow] = useState<{ start: Date; end: Date } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -599,7 +609,7 @@ function MetricChart({ metric, telemetry, latestPoint, fontSize }: MetricChartPr
         <div>
           <h3 className="text-base font-semibold text-slate-900">{metric.label}</h3>
           <p className="text-sm text-slate-600">
-            Latest: {formatMetricValue(latestPoint?.[metric.key] ?? null, metric.unit)}
+            {translation.latest}: {formatMetricValue(latestPoint?.[metric.key] ?? null, metric.unit, translation.notAvailable)}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -615,14 +625,14 @@ function MetricChart({ metric, telemetry, latestPoint, fontSize }: MetricChartPr
               onClick={() => setZoomWindow(null)}
               className="rounded-full border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
             >
-              Reset zoom
+              {translation.resetZoom}
             </button>
           )}
           <select
             value={selectedRange}
             onChange={(e) => handleRangeChange(e.target.value as TimeRangeKey)}
             className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-500"
-            aria-label={`${metric.label} timespan`}
+            aria-label={`${metric.label} ${translation.timespan}`}
           >
             {timeRangeOptions.map((opt) => (
               <option key={opt.key} value={opt.key}>{opt.label}</option>
@@ -641,7 +651,7 @@ function MetricChart({ metric, telemetry, latestPoint, fontSize }: MetricChartPr
               dataKey={(p: TelemetryPoint) => p.timestamp.getTime()}
               domain={xDomain}
               ticks={timeTicks}
-              tickFormatter={(ms: number) => formatTime(new Date(ms))}
+              tickFormatter={(ms: number) => formatTime(new Date(ms), locale, translation.notAvailable)}
               stroke="#475569"
               tick={{ fontSize }}
             />
@@ -654,8 +664,8 @@ function MetricChart({ metric, telemetry, latestPoint, fontSize }: MetricChartPr
               tick={{ fontSize }}
             />
             <Tooltip
-              labelFormatter={(ms) => formatDateTime(new Date(ms as number))}
-              formatter={(value) => [formatTooltipValue(value), metric.label]}
+              labelFormatter={(ms) => formatDateTime(new Date(ms as number), locale, translation.notAvailable)}
+              formatter={(value) => [formatTooltipValue(value, translation.notAvailable), metric.label]}
               contentStyle={{ fontSize }}
             />
             <Line
@@ -672,15 +682,16 @@ function MetricChart({ metric, telemetry, latestPoint, fontSize }: MetricChartPr
 
       <p className="mt-2 text-center text-xs text-slate-400">
         {xWindow
-          ? `${formatDateTime(new Date(xWindow.start))} – ${formatDateTime(new Date(xWindow.end))} · `
+          ? `${formatDateTime(new Date(xWindow.start), locale, translation.notAvailable)} – ${formatDateTime(new Date(xWindow.end), locale, translation.notAvailable)} · `
           : ''}
-        Shift+scroll to zoom · drag to pan
+        {translation.zoomHint}
       </p>
     </article>
   )
 }
 
 function App() {
+  const [language, setLanguage] = useState<Language>(() => getInitialLanguage())
   const [user, setUser] = useState<User | null>(null)
   const [authLoading, setAuthLoading] = useState(Boolean(auth))
   const [authPending, setAuthPending] = useState(false)
@@ -691,6 +702,22 @@ function App() {
   const [isStandby, setIsStandby] = useState(false)
   const inactivityTimerRef = useRef<number | null>(null)
   const isAuthorized = Boolean(user)
+  const translation = TRANSLATIONS[language]
+  const locale = LANGUAGE_LOCALES[language]
+  const stationLabel = `${translation.stationType} - ${translation.stationName}`
+  const stationSiteName = `${stationLabel} Dashboard`
+
+  const timeRangeOptions = useMemo(() => getTimeRangeOptions(translation), [translation])
+  const localizedTelemetryMetrics: MetricDefinition[] = useMemo(
+    () => telemetryMetrics.map((metric) => ({ ...metric, label: translation.metricLabels[metric.key] })),
+    [translation],
+  )
+
+  useEffect(() => {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language)
+    document.title = stationSiteName
+    document.documentElement.lang = language
+  }, [language, stationSiteName])
 
   useEffect(() => {
     if (!auth) {
@@ -830,7 +857,7 @@ function App() {
     try {
       await signInWithPopup(auth, provider)
     } catch (error) {
-      setAuthError(describeAuthError(error))
+      setAuthError(describeAuthError(error, translation))
     } finally {
       setAuthPending(false)
     }
@@ -847,10 +874,9 @@ function App() {
     return (
       <main className="mx-auto max-w-3xl p-6 md:p-10">
         <section className="panel reveal rounded-3xl p-8">
-          <h1 className="text-3xl font-semibold text-slate-900">Firebase Config Missing</h1>
+          <h1 className="text-3xl font-semibold text-slate-900">{translation.firebaseConfigMissing}</h1>
           <p className="mt-3 text-slate-700">
-            Add the missing variables to your local <strong>.env</strong> file and to GitHub Secrets for
-            CI deploys.
+            {translation.firebaseConfigDescription}
           </p>
           <ul className="mt-6 list-disc space-y-1 pl-6 font-mono text-sm text-slate-800">
             {firebaseEnvErrors.map((name) => (
@@ -863,20 +889,19 @@ function App() {
   }
 
   if (authLoading) {
-    return <main className="mx-auto max-w-3xl p-8 text-slate-800">Checking authentication...</main>
+    return <main className="mx-auto max-w-3xl p-8 text-slate-800">{translation.checkingAuthentication}</main>
   }
 
   if (!user) {
     return (
       <main className="mx-auto max-w-4xl p-6 md:p-10">
         <section className="panel reveal rounded-3xl p-8 md:p-12">
-          <p className="eyebrow">Roadside Sentry</p>
+          <p className="eyebrow">{stationLabel}</p>
           <h1 className="mt-2 text-4xl font-semibold text-slate-900 md:text-6xl">
-            Real-time Traffic and Environment Monitor
+            {translation.signInHeading}
           </h1>
           <p className="mt-4 max-w-2xl text-lg text-slate-700">
-            Sign in with Google to access live telemetry from Firestore. Access is restricted by
-            Firestore security rules to authenticated users only.
+            {translation.signInDescription}
           </p>
           <button
             type="button"
@@ -886,7 +911,7 @@ function App() {
             disabled={authPending}
             className="mt-8 rounded-full bg-slate-900 px-6 py-3 font-medium text-white transition hover:-translate-y-0.5 hover:bg-slate-800"
           >
-            {authPending ? 'Signing in...' : 'Sign in with Google'}
+            {authPending ? translation.signingIn : translation.signInWithGoogle}
           </button>
           {authError && <p className="mt-4 text-sm text-rose-700">{authError}</p>}
         </section>
@@ -898,13 +923,13 @@ function App() {
     <main className="mx-auto max-w-7xl p-4 pb-10 md:p-8 md:pb-14" style={{ fontSize }}>
       <header className="reveal flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-slate-200 bg-white/80 px-5 py-4 backdrop-blur md:px-8">
         <div>
-          <p className="eyebrow">Roadside Sentry Dashboard</p>
-          <h1 className="text-2xl font-semibold text-slate-900 md:text-3xl">Live Operations View</h1>
+          <p className="eyebrow">{stationSiteName}</p>
+          <h1 className="text-2xl font-semibold text-slate-900 md:text-3xl">{translation.viewTitle}</h1>
         </div>
         <div className="flex items-center gap-2">
           {isStandby && (
             <p className="rounded-full bg-amber-100 px-3 py-1.5 text-sm font-medium text-amber-900">
-              Standby mode (no Firestore reads)
+              {translation.standbyMode}
             </p>
           )}
           <div className="flex items-center gap-1 rounded-full border border-slate-300 bg-white px-1 py-0.5">
@@ -912,7 +937,7 @@ function App() {
               type="button"
               onClick={() => setFontSize((s) => Math.max(10, s - 1))}
               className="flex h-7 w-7 items-center justify-center rounded-full text-slate-700 transition hover:bg-slate-100"
-              aria-label="Decrease font size"
+              aria-label={translation.decreaseFontSize}
             >
               −
             </button>
@@ -921,11 +946,24 @@ function App() {
               type="button"
               onClick={() => setFontSize((s) => Math.min(28, s + 1))}
               className="flex h-7 w-7 items-center justify-center rounded-full text-slate-700 transition hover:bg-slate-100"
-              aria-label="Increase font size"
+              aria-label={translation.increaseFontSize}
             >
               +
             </button>
           </div>
+          <label className="flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700">
+            <span className="text-xs font-medium uppercase tracking-wide text-slate-500">{translation.language}</span>
+            <select
+              value={language}
+              onChange={(event) => setLanguage(event.target.value as Language)}
+              className="bg-transparent text-sm text-slate-800 outline-none"
+              aria-label={translation.language}
+            >
+              {LANGUAGE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
           <p className="rounded-full bg-slate-100 px-3 py-1.5 text-sm text-slate-700">{user.email}</p>
           <button
             type="button"
@@ -934,46 +972,46 @@ function App() {
             }}
             className="rounded-full border border-slate-400 px-4 py-1.5 text-sm font-medium text-slate-900 transition hover:bg-slate-100"
           >
-            Sign out
+            {translation.signOut}
           </button>
         </div>
       </header>
 
       <section className="mt-5 grid gap-4 md:grid-cols-2">
         <article className="panel reveal rounded-3xl p-6" style={{ animationDelay: '90ms' }}>
-          <h2 className="text-lg font-semibold text-slate-900">Live Status</h2>
+          <h2 className="text-lg font-semibold text-slate-900">{translation.liveStatus}</h2>
           <div className="mt-5 grid gap-3">
             <div className="status-card">
-              <p className="status-label">Radar</p>
-              <p className={`status-pill ${radarStatus.toLowerCase()}`}>{radarStatus}</p>
+              <p className="status-label">{translation.radar}</p>
+              <p className={`status-pill ${radarStatus.toLowerCase()}`}>{translation.connectivity[radarStatus]}</p>
             </div>
             <div className="status-card">
-              <p className="status-label">Sonometer</p>
-              <p className={`status-pill ${sonometerStatus.toLowerCase()}`}>{sonometerStatus}</p>
+              <p className="status-label">{translation.sonometer}</p>
+              <p className={`status-pill ${sonometerStatus.toLowerCase()}`}>{translation.connectivity[sonometerStatus]}</p>
             </div>
             <p className="text-sm text-slate-600">
-              Last heartbeat: {latestTelemetry ? formatDateTime(latestTelemetry.timestamp) : 'No data yet'}
+              {translation.lastHeartbeat}: {latestTelemetry ? formatDateTime(latestTelemetry.timestamp, locale, translation.notAvailable) : translation.noDataYet}
             </p>
           </div>
         </article>
 
         <article className="panel reveal rounded-3xl p-6" style={{ animationDelay: '160ms' }}>
-          <h2 className="text-lg font-semibold text-slate-900">Traffic Feed</h2>
+          <h2 className="text-lg font-semibold text-slate-900">{translation.trafficFeed}</h2>
           <div className="mt-4 max-h-80 space-y-2 overflow-y-auto pr-1">
             {trafficEvents.length === 0 && (
-              <p className="rounded-2xl bg-slate-100 px-4 py-3 text-slate-700">No events available.</p>
+              <p className="rounded-2xl bg-slate-100 px-4 py-3 text-slate-700">{translation.noEventsAvailable}</p>
             )}
             {trafficEvents.map((event) => (
               <div key={event.id} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="font-medium text-slate-900">{event.className}</p>
                   <p className="font-mono text-xs uppercase tracking-wide text-slate-500">
-                    {formatDateTime(event.timestamp)}
+                    {formatDateTime(event.timestamp, locale, translation.notAvailable)}
                   </p>
                 </div>
                 <p className="mt-1 text-sm text-slate-700">
-                  Speed: <strong>{event.speed ?? 'N/A'} km/h</strong> | Direction:{' '}
-                  <strong>{event.direction}</strong> | Peak dBA: <strong>{event.peakDba ?? 'N/A'}</strong>
+                  {translation.speed}: <strong>{event.speed ?? translation.notAvailable} km/h</strong> | {translation.direction}:{' '}
+                  <strong>{event.direction}</strong> | {translation.peakDba}: <strong>{event.peakDba ?? translation.notAvailable}</strong>
                 </p>
               </div>
             ))}
@@ -982,15 +1020,18 @@ function App() {
       </section>
 
       <section className="panel reveal mt-4 rounded-3xl p-6" style={{ animationDelay: '230ms' }}>
-        <h2 className="text-lg font-semibold text-slate-900">Environmental Telemetry</h2>
+        <h2 className="text-lg font-semibold text-slate-900">{translation.environmentalTelemetry}</h2>
         <div className="mt-5 grid gap-4 lg:grid-cols-2">
-          {telemetryMetrics.map((metric) => (
+          {localizedTelemetryMetrics.map((metric) => (
             <MetricChart
               key={metric.key}
               metric={metric}
               telemetry={telemetry}
               latestPoint={latestTelemetry}
               fontSize={fontSize}
+              locale={locale}
+              translation={translation}
+              timeRangeOptions={timeRangeOptions}
             />
           ))}
         </div>
