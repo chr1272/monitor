@@ -97,10 +97,7 @@ type TimeRangeKey =
   | 'today'
   | 'yesterday'
 
-type TimeRangeOption = {
-  key: TimeRangeKey
-  label: string
-}
+
 
 function describeAuthError(error: unknown, translation: Translation): string {
   if (error && typeof error === 'object') {
@@ -474,7 +471,9 @@ type MetricChartProps = {
   fontSize: number
   locale: string
   translation: Translation
-  timeRangeOptions: TimeRangeOption[]
+  selectedRange: TimeRangeKey
+  zoomWindow: { start: Date; end: Date } | null
+  onZoomChange: (w: { start: Date; end: Date } | null) => void
 }
 
 function MetricChart({
@@ -484,10 +483,10 @@ function MetricChart({
   fontSize,
   locale,
   translation,
-  timeRangeOptions,
+  selectedRange,
+  zoomWindow,
+  onZoomChange,
 }: MetricChartProps) {
-  const [selectedRange, setSelectedRange] = useState<TimeRangeKey>('last24Hours')
-  const [zoomWindow, setZoomWindow] = useState<{ start: Date; end: Date } | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ startX: number; startMs: number; endMs: number } | null>(null)
 
@@ -533,7 +532,7 @@ function MetricChart({
       const halfSpanMs = (currentEnd - currentStart) / 2
       const factor = event.deltaY > 0 ? 1.5 : 1 / 1.5
       const newHalfSpan = Math.max(halfSpanMs * factor, 60_000)
-      setZoomWindow({
+      onZoomChange({
         start: new Date(centerMs - newHalfSpan),
         end: new Date(centerMs + newHalfSpan),
       })
@@ -567,7 +566,7 @@ function MetricChart({
       const newStart = Math.max(rangeStart, drag.startMs + msDelta)
       const newEnd = Math.min(rangeEnd, drag.endMs + msDelta)
       if (newEnd - newStart > 60_000) {
-        setZoomWindow({ start: new Date(newStart), end: new Date(newEnd) })
+        onZoomChange({ start: new Date(newStart), end: new Date(newEnd) })
       }
     },
     [filteredByRange],
@@ -589,11 +588,6 @@ function MetricChart({
       window.removeEventListener('mouseup', handleMouseUp)
     }
   }, [handleWheel, handleMouseDown, handleMouseMove, handleMouseUp])
-
-  const handleRangeChange = (value: TimeRangeKey) => {
-    setSelectedRange(value)
-    setZoomWindow(null)
-  }
 
   const xDomain: [number, number] | ['auto', 'auto'] = timeTicks.length >= 2
     ? [timeTicks[0], timeTicks[timeTicks.length - 1]]
@@ -619,25 +613,6 @@ function MetricChart({
           >
             {metric.unit}
           </span>
-          {xWindow && (
-            <button
-              type="button"
-              onClick={() => setZoomWindow(null)}
-              className="rounded-full border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
-            >
-              {translation.resetZoom}
-            </button>
-          )}
-          <select
-            value={selectedRange}
-            onChange={(e) => handleRangeChange(e.target.value as TimeRangeKey)}
-            className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-500"
-            aria-label={`${metric.label} ${translation.timespan}`}
-          >
-            {timeRangeOptions.map((opt) => (
-              <option key={opt.key} value={opt.key}>{opt.label}</option>
-            ))}
-          </select>
         </div>
       </div>
 
@@ -681,10 +656,7 @@ function MetricChart({
       </div>
 
       <p className="mt-2 text-center text-xs text-slate-400">
-        {xWindow
-          ? `${formatDateTime(new Date(xWindow.start), locale, translation.notAvailable)} – ${formatDateTime(new Date(xWindow.end), locale, translation.notAvailable)} · `
-          : ''}
-        {translation.zoomHint}
+        {xWindow ? `${formatDateTime(new Date(xWindow.start), locale, translation.notAvailable)} – ${formatDateTime(new Date(xWindow.end), locale, translation.notAvailable)}` : translation.zoomHint}
       </p>
     </article>
   )
@@ -692,6 +664,8 @@ function MetricChart({
 
 function App() {
   const [language, setLanguage] = useState<Language>(() => getInitialLanguage())
+  const [selectedRange, setSelectedRange] = useState<TimeRangeKey>('last24Hours')
+  const [zoomWindow, setZoomWindow] = useState<{ start: Date; end: Date } | null>(null)
   const [user, setUser] = useState<User | null>(null)
   const [authLoading, setAuthLoading] = useState(Boolean(auth))
   const [authPending, setAuthPending] = useState(false)
@@ -1020,7 +994,30 @@ function App() {
       </section>
 
       <section className="panel reveal mt-4 rounded-3xl p-6" style={{ animationDelay: '230ms' }}>
-        <h2 className="text-lg font-semibold text-slate-900">{translation.environmentalTelemetry}</h2>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-slate-900">{translation.environmentalTelemetry}</h2>
+          <div className="flex items-center gap-2">
+            {zoomWindow && (
+              <button
+                type="button"
+                onClick={() => setZoomWindow(null)}
+                className="rounded-full border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
+              >
+                {translation.resetZoom}
+              </button>
+            )}
+            <select
+              value={selectedRange}
+              onChange={(e) => { setSelectedRange(e.target.value as TimeRangeKey); setZoomWindow(null) }}
+              className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-800 shadow-sm outline-none transition focus:border-slate-500"
+              aria-label={translation.timespan}
+            >
+              {timeRangeOptions.map((opt) => (
+                <option key={opt.key} value={opt.key}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
         <div className="mt-5 grid gap-4 lg:grid-cols-2">
           {localizedTelemetryMetrics.map((metric) => (
             <MetricChart
@@ -1031,7 +1028,9 @@ function App() {
               fontSize={fontSize}
               locale={locale}
               translation={translation}
-              timeRangeOptions={timeRangeOptions}
+              selectedRange={selectedRange}
+              zoomWindow={zoomWindow}
+              onZoomChange={setZoomWindow}
             />
           ))}
         </div>
