@@ -83,3 +83,6 @@ Set these secrets in your GitHub repository settings:
 - `VITE_FIREBASE_APP_ID`
 
 When you push to `main`, GitHub Actions builds and publishes `dist` to GitHub Pages.
+
+For custom domains (for example `monitor.pixelking.io`), set `VITE_BASE_PATH=/`.
+Use `/monitor/` only when hosting under a repository subpath like `username.github.io/repo`.

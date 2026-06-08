@@ -2,7 +2,7 @@
   "name": "gitpage",
   "private": true,
   "version": "0.0.0",
-  "homepage": "https://chr1272.github.io/monitor/",
+  "homepage": "https://monitor.pixelking.io/",
   "type": "module",
   "scripts": {
     "dev": "vite",
