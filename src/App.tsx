@@ -9,7 +9,6 @@ import {
 import {
   Timestamp,
   collection,
-  limit,
   onSnapshot,
   orderBy,
   query,
@@ -25,6 +24,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { Bar, BarChart } from 'recharts'
 import { auth, db, firebaseEnvErrors } from './firebase'
 import {
   getInitialLanguage,
@@ -462,6 +462,55 @@ function formatTooltipValue(
   return Number.isFinite(parsed) ? parsed.toFixed(2) : String(value)
 }
 
+function pickBucketMs(spanMs: number): number {
+  if (spanMs > 14 * 24 * 60 * 60 * 1000) return 24 * 60 * 60 * 1000
+  if (spanMs > 4 * 24 * 60 * 60 * 1000) return 6 * 60 * 60 * 1000
+  if (spanMs > 24 * 60 * 60 * 1000) return 60 * 60 * 1000
+  if (spanMs > 6 * 60 * 60 * 1000) return 30 * 60 * 1000
+  if (spanMs > 90 * 60 * 1000) return 15 * 60 * 1000
+  if (spanMs > 20 * 60 * 1000) return 5 * 60 * 1000
+  return 60 * 1000
+}
+
+type TrafficBucket = { label: string; t: number; count: number }
+
+function formatBucketLabel(t: number, bucketMs: number, locale: string): string {
+  const date = new Date(t)
+  if (bucketMs >= 24 * 60 * 60 * 1000) {
+    return date.toLocaleDateString(locale, { day: '2-digit', month: '2-digit', timeZone: CET_TZ })
+  }
+  if (bucketMs >= 6 * 60 * 60 * 1000) {
+    const day = date.toLocaleDateString(locale, { day: '2-digit', month: '2-digit', timeZone: CET_TZ })
+    const time = date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: CET_TZ })
+    return `${day} ${time}`
+  }
+  return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: CET_TZ })
+}
+
+function buildTrafficBuckets(
+  events: TrafficEvent[],
+  startMs: number,
+  endMs: number,
+  bucketMs: number,
+  locale: string,
+): TrafficBucket[] {
+  if (endMs <= startMs) return []
+  const firstBucket = Math.floor(startMs / bucketMs) * bucketMs
+  const numBuckets = Math.ceil((endMs - firstBucket) / bucketMs)
+  const buckets: TrafficBucket[] = Array.from({ length: numBuckets }, (_, i) => {
+    const t = firstBucket + i * bucketMs
+    return { t, label: formatBucketLabel(t, bucketMs, locale), count: 0 }
+  })
+  for (const event of events) {
+    if (!event.timestamp) continue
+    const ts = event.timestamp.getTime()
+    if (ts < startMs || ts >= endMs) continue
+    const idx = Math.floor((ts - firstBucket) / bucketMs)
+    if (idx >= 0 && idx < buckets.length) buckets[idx].count++
+  }
+  return buckets
+}
+
 // ── Per-metric chart card with independent range + Shift+scroll zoom ─────────
 
 type MetricChartProps = {
@@ -662,6 +711,142 @@ function MetricChart({
   )
 }
 
+function TrafficHistogramChart({
+  trafficEvents,
+  selectedRange,
+  zoomWindow,
+  onZoomChange,
+  locale,
+  translation,
+  fontSize,
+}: {
+  trafficEvents: TrafficEvent[]
+  selectedRange: TimeRangeKey
+  zoomWindow: { start: Date; end: Date } | null
+  onZoomChange: (w: { start: Date; end: Date } | null) => void
+  locale: string
+  translation: Translation
+  fontSize: number
+}) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const dragRef = useRef<{ startX: number; startMs: number; endMs: number } | null>(null)
+
+  const rangeBounds = useMemo(() => {
+    const { start, end } = getTimeRangeBounds(selectedRange)
+    return {
+      start: start ? start.getTime() : Date.now() - 30 * 24 * 60 * 60 * 1000,
+      end: end ? end.getTime() : Date.now(),
+    }
+  }, [selectedRange])
+
+  const xWindow = useMemo(() => {
+    if (!zoomWindow) return null
+    return {
+      start: Math.max(zoomWindow.start.getTime(), rangeBounds.start),
+      end: Math.min(zoomWindow.end.getTime(), rangeBounds.end),
+    }
+  }, [zoomWindow, rangeBounds])
+
+  const visibleStart = xWindow?.start ?? rangeBounds.start
+  const visibleEnd = xWindow?.end ?? rangeBounds.end
+  const spanMs = Math.max(visibleEnd - visibleStart, 60_000)
+  const bucketMs = pickBucketMs(spanMs)
+
+  const buckets = useMemo(
+    () => buildTrafficBuckets(trafficEvents, visibleStart, visibleEnd, bucketMs, locale),
+    [trafficEvents, visibleStart, visibleEnd, bucketMs, locale],
+  )
+
+  const tickInterval = Math.max(0, Math.ceil(buckets.length / 6) - 1)
+
+  const handleWheel = useCallback(
+    (event: WheelEvent) => {
+      if (!event.shiftKey) return
+      event.preventDefault()
+      const currentStart = xWindow?.start ?? rangeBounds.start
+      const currentEnd = xWindow?.end ?? rangeBounds.end
+      const centerMs = (currentStart + currentEnd) / 2
+      const halfSpanMs = (currentEnd - currentStart) / 2
+      const factor = event.deltaY > 0 ? 1.5 : 1 / 1.5
+      const newHalfSpan = Math.max(halfSpanMs * factor, 60_000)
+      onZoomChange({ start: new Date(centerMs - newHalfSpan), end: new Date(centerMs + newHalfSpan) })
+    },
+    [xWindow, rangeBounds, onZoomChange],
+  )
+
+  const handleMouseDown = useCallback(
+    (event: MouseEvent) => {
+      if (!xWindow || event.button !== 0) return
+      dragRef.current = { startX: event.clientX, startMs: xWindow.start, endMs: xWindow.end }
+    },
+    [xWindow],
+  )
+
+  const handleMouseMove = useCallback(
+    (event: MouseEvent) => {
+      const drag = dragRef.current
+      if (!drag || !containerRef.current) return
+      const containerWidth = containerRef.current.getBoundingClientRect().width
+      if (containerWidth === 0) return
+      const span = drag.endMs - drag.startMs
+      const pxDelta = event.clientX - drag.startX
+      const msDelta = -(pxDelta / containerWidth) * span
+      const newStart = Math.max(rangeBounds.start, drag.startMs + msDelta)
+      const newEnd = Math.min(rangeBounds.end, drag.endMs + msDelta)
+      if (newEnd - newStart > 60_000) {
+        onZoomChange({ start: new Date(newStart), end: new Date(newEnd) })
+      }
+    },
+    [rangeBounds, onZoomChange],
+  )
+
+  const handleMouseUp = useCallback(() => { dragRef.current = null }, [])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    el.addEventListener('wheel', handleWheel, { passive: false })
+    el.addEventListener('mousedown', handleMouseDown)
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+    return () => {
+      el.removeEventListener('wheel', handleWheel)
+      el.removeEventListener('mousedown', handleMouseDown)
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [handleWheel, handleMouseDown, handleMouseMove, handleMouseUp])
+
+  return (
+    <article
+      ref={containerRef}
+      className="lg:col-span-2 rounded-3xl border border-slate-200 bg-white p-4 shadow-sm"
+      style={{ cursor: xWindow ? 'grab' : 'default' }}
+    >
+      <div>
+        <h3 className="text-base font-semibold text-slate-900">{translation.trafficOverview}</h3>
+        <p className="text-sm text-slate-600">{trafficEvents.length} {translation.eventCount}</p>
+      </div>
+      <div className="mt-4 h-48 w-full select-none">
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={buckets} margin={{ top: 8, right: 20, left: 4, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
+            <XAxis dataKey="label" interval={tickInterval} stroke="#475569" tick={{ fontSize }} />
+            <YAxis allowDecimals={false} stroke="#475569" tick={{ fontSize }} width={40} />
+            <Tooltip formatter={(value) => [value, translation.eventCount]} contentStyle={{ fontSize }} />
+            <Bar dataKey="count" fill="#2563eb" radius={[3, 3, 0, 0]} isAnimationActive={false} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <p className="mt-2 text-center text-xs text-slate-400">
+        {xWindow
+          ? `${formatDateTime(new Date(xWindow.start), locale, translation.notAvailable)} – ${formatDateTime(new Date(xWindow.end), locale, translation.notAvailable)}`
+          : translation.zoomHint}
+      </p>
+    </article>
+  )
+}
+
 function App() {
   const [language, setLanguage] = useState<Language>(() => getInitialLanguage())
   const [selectedRange, setSelectedRange] = useState<TimeRangeKey>('last24Hours')
@@ -785,8 +970,13 @@ function App() {
 
     const trafficQuery = query(
       collection(db, 'traffic_events'),
-      orderBy('timestamp', 'desc'),
-      limit(10),
+      where('timestamp', '>=', (() => {
+        const { start } = getTimeRangeBounds(selectedRange)
+        return start
+          ? start.toISOString()
+          : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+      })()),
+      orderBy('timestamp', 'asc'),
     )
 
     const unsubscribe = onSnapshot(trafficQuery, (snapshot) => {
@@ -801,16 +991,11 @@ function App() {
           peakDba: readNumber(raw, trafficPeakKeys),
         }
       })
-      events.sort((left, right) => {
-        const leftTime = left.timestamp?.getTime() ?? 0
-        const rightTime = right.timestamp?.getTime() ?? 0
-        return rightTime - leftTime
-      })
       setTrafficEvents(events)
     })
 
     return () => unsubscribe()
-  }, [isAuthorized, isStandby])
+  }, [isAuthorized, isStandby, selectedRange])
 
   const latestTelemetry = telemetry.length > 0 ? telemetry[telemetry.length - 1] : null
   const radarStatus = inferConnectivity(latestTelemetry?.raw, radarStatusKeys, latestTelemetry?.timestamp ?? null)
@@ -951,10 +1136,10 @@ function App() {
         </div>
       </header>
 
-      <section className="mt-5 grid gap-4 md:grid-cols-2">
+      <section className="mt-5">
         <article className="panel reveal rounded-3xl p-6" style={{ animationDelay: '90ms' }}>
           <h2 className="text-lg font-semibold text-slate-900">{translation.liveStatus}</h2>
-          <div className="mt-5 grid gap-3">
+          <div className="mt-5 flex flex-wrap gap-4">
             <div className="status-card">
               <p className="status-label">{translation.radar}</p>
               <p className={`status-pill ${radarStatus.toLowerCase()}`}>{translation.connectivity[radarStatus]}</p>
@@ -963,32 +1148,9 @@ function App() {
               <p className="status-label">{translation.sonometer}</p>
               <p className={`status-pill ${sonometerStatus.toLowerCase()}`}>{translation.connectivity[sonometerStatus]}</p>
             </div>
-            <p className="text-sm text-slate-600">
+            <p className="text-sm text-slate-600 self-center">
               {translation.lastHeartbeat}: {latestTelemetry ? formatDateTime(latestTelemetry.timestamp, locale, translation.notAvailable) : translation.noDataYet}
             </p>
-          </div>
-        </article>
-
-        <article className="panel reveal rounded-3xl p-6" style={{ animationDelay: '160ms' }}>
-          <h2 className="text-lg font-semibold text-slate-900">{translation.trafficFeed}</h2>
-          <div className="mt-4 max-h-80 space-y-2 overflow-y-auto pr-1">
-            {trafficEvents.length === 0 && (
-              <p className="rounded-2xl bg-slate-100 px-4 py-3 text-slate-700">{translation.noEventsAvailable}</p>
-            )}
-            {trafficEvents.map((event) => (
-              <div key={event.id} className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-medium text-slate-900">{event.className}</p>
-                  <p className="font-mono text-xs uppercase tracking-wide text-slate-500">
-                    {formatDateTime(event.timestamp, locale, translation.notAvailable)}
-                  </p>
-                </div>
-                <p className="mt-1 text-sm text-slate-700">
-                  {translation.speed}: <strong>{event.speed ?? translation.notAvailable} km/h</strong> | {translation.direction}:{' '}
-                  <strong>{event.direction}</strong> | {translation.peakDba}: <strong>{event.peakDba ?? translation.notAvailable}</strong>
-                </p>
-              </div>
-            ))}
           </div>
         </article>
       </section>
@@ -1019,6 +1181,15 @@ function App() {
           </div>
         </div>
         <div className="mt-5 grid gap-4 lg:grid-cols-2">
+          <TrafficHistogramChart
+            trafficEvents={trafficEvents}
+            selectedRange={selectedRange}
+            zoomWindow={zoomWindow}
+            onZoomChange={setZoomWindow}
+            locale={locale}
+            translation={translation}
+            fontSize={fontSize}
+          />
           {localizedTelemetryMetrics.map((metric) => (
             <MetricChart
               key={metric.key}

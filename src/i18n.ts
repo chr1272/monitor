@@ -54,6 +54,8 @@ export type Translation = {
   signInWithGoogle: string
   signingIn: string
   notAvailable: string
+  trafficOverview: string
+  eventCount: string
   connectivity: Record<Connectivity, string>
   metricLabels: Record<MetricKey, string>
   timeRanges: Record<TimeRangeKey, string>
@@ -121,6 +123,8 @@ export const TRANSLATIONS: Record<Language, Translation> = {
     signInWithGoogle: 'Sign in with Google',
     signingIn: 'Signing in...',
     notAvailable: 'N/A',
+    trafficOverview: 'Traffic Events Overview',
+    eventCount: 'events',
     connectivity: { Online: 'Online', Offline: 'Offline', Unknown: 'Unknown' },
     metricLabels: {
       temp: 'Temperature',
@@ -183,6 +187,8 @@ export const TRANSLATIONS: Record<Language, Translation> = {
     signInWithGoogle: 'Mit Google anmelden',
     signingIn: 'Anmeldung laeuft...',
     notAvailable: 'k. A.',
+    trafficOverview: 'Uebersicht Verkehrsereignisse',
+    eventCount: 'Ereignisse',
     connectivity: { Online: 'Online', Offline: 'Offline', Unknown: 'Unbekannt' },
     metricLabels: {
       temp: 'Temperatur',
@@ -245,6 +251,8 @@ export const TRANSLATIONS: Record<Language, Translation> = {
     signInWithGoogle: 'Se connecter avec Google',
     signingIn: 'Connexion en cours...',
     notAvailable: 'N/D',
+    trafficOverview: 'Apercu des evenements de trafic',
+    eventCount: 'evenements',
     connectivity: { Online: 'En ligne', Offline: 'Hors ligne', Unknown: 'Inconnu' },
     metricLabels: {
       temp: 'Temperature',
@@ -307,6 +315,8 @@ export const TRANSLATIONS: Record<Language, Translation> = {
     signInWithGoogle: 'Iniciar sesion con Google',
     signingIn: 'Iniciando sesion...',
     notAvailable: 'N/D',
+    trafficOverview: 'Resumen de eventos de trafico',
+    eventCount: 'eventos',
     connectivity: { Online: 'En linea', Offline: 'Sin conexion', Unknown: 'Desconocido' },
     metricLabels: {
       temp: 'Temperatura',
@@ -369,6 +379,8 @@ export const TRANSLATIONS: Record<Language, Translation> = {
     signInWithGoogle: 'Accedi con Google',
     signingIn: 'Accesso in corso...',
     notAvailable: 'N/D',
+    trafficOverview: 'Riepilogo degli eventi di traffico',
+    eventCount: 'eventi',
     connectivity: { Online: 'Online', Offline: 'Offline', Unknown: 'Sconosciuto' },
     metricLabels: {
       temp: 'Temperatura',
