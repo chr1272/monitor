@@ -92,6 +92,37 @@ type TimeRangeOption = {
   label: string
 }
 
+function describeAuthError(error: unknown): string {
+  if (error && typeof error === 'object') {
+    const code = 'code' in error && typeof error.code === 'string' ? error.code : null
+    const message = 'message' in error && typeof error.message === 'string' ? error.message : null
+
+    switch (code) {
+      case 'auth/popup-closed-by-user':
+        return 'Sign-in popup was closed before login completed.'
+      case 'auth/popup-blocked':
+        return 'Popup was blocked by the browser. Allow popups for this site and try again.'
+      case 'auth/unauthorized-domain':
+        return 'This domain is not authorized in Firebase Auth. Add monitor.pixelking.io to Authorized domains.'
+      case 'auth/operation-not-allowed':
+        return 'Google sign-in is not enabled in Firebase Authentication -> Sign-in method.'
+      case 'auth/invalid-api-key':
+        return 'Firebase API key is invalid. Check VITE_FIREBASE_API_KEY in your GitHub secrets.'
+      default:
+        if (code && message) {
+          return `${message} (${code})`
+        }
+        if (code) {
+          return `Authentication failed (${code}).`
+        }
+        if (message) {
+          return message
+        }
+    }
+  }
+  return 'Authentication failed. Please check Firebase Auth settings and try again.'
+}
+
 const telemetryMetrics: MetricDefinition[] = [
   { key: 'temp', label: 'Temperature', color: '#0f766e', unit: '°C' },
   { key: 'hum', label: 'Humidity', color: '#2563eb', unit: '%' },
@@ -652,6 +683,8 @@ function MetricChart({ metric, telemetry, latestPoint, fontSize }: MetricChartPr
 function App() {
   const [user, setUser] = useState<User | null>(null)
   const [authLoading, setAuthLoading] = useState(Boolean(auth))
+  const [authPending, setAuthPending] = useState(false)
+  const [authError, setAuthError] = useState<string | null>(null)
   const [telemetry, setTelemetry] = useState<TelemetryPoint[]>([])
   const [trafficEvents, setTrafficEvents] = useState<TrafficEvent[]>([])
   const [fontSize, setFontSize] = useState(16)
@@ -786,13 +819,21 @@ function App() {
     latestTelemetry?.timestamp ?? null,
   )
 
-  const provider = new GoogleAuthProvider()
+  const provider = useMemo(() => new GoogleAuthProvider(), [])
 
   const handleLogin = async () => {
     if (!auth) {
       return
     }
-    await signInWithPopup(auth, provider)
+    setAuthError(null)
+    setAuthPending(true)
+    try {
+      await signInWithPopup(auth, provider)
+    } catch (error) {
+      setAuthError(describeAuthError(error))
+    } finally {
+      setAuthPending(false)
+    }
   }
 
   const handleLogout = async () => {
@@ -842,10 +883,12 @@ function App() {
             onClick={() => {
               void handleLogin()
             }}
+            disabled={authPending}
             className="mt-8 rounded-full bg-slate-900 px-6 py-3 font-medium text-white transition hover:-translate-y-0.5 hover:bg-slate-800"
           >
-            Sign in with Google
+            {authPending ? 'Signing in...' : 'Sign in with Google'}
           </button>
+          {authError && <p className="mt-4 text-sm text-rose-700">{authError}</p>}
         </section>
       </main>
     )
