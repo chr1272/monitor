@@ -9,7 +9,11 @@ import {
 import {
   Timestamp,
   collection,
+  limit,
   onSnapshot,
+  orderBy,
+  query,
+  where,
   type DocumentData,
 } from 'firebase/firestore'
 import {
@@ -61,6 +65,8 @@ const trafficClassKeys = ['class', 'classification', 'vehicleClass', 'type']
 const trafficSpeedKeys = ['speed', 'speed_kph', 'speedKmh', 'velocity']
 const trafficDirectionKeys = ['direction', 'heading', 'dir']
 const trafficPeakKeys = ['peak_dba', 'peakDbA', 'peak', 'laeq_1m', 'peak_dB', 'peakdba']
+const TELEMETRY_REALTIME_HOURS = 24
+const INACTIVITY_STANDBY_MS = 10 * 60 * 1000
 
 type MetricKey = 'temp' | 'hum' | 'pres' | 'gas' | 'laeq1m'
 
@@ -95,7 +101,7 @@ const telemetryMetrics: MetricDefinition[] = [
 ]
 
 const timeRangeOptions: TimeRangeOption[] = [
-  { key: 'all', label: 'All records' },
+  { key: 'all', label: 'All loaded records' },
   { key: 'last7Days', label: 'Last 7 days' },
   { key: 'last24Hours', label: 'Last 24 h' },
   { key: 'last6Hours', label: 'Last 6 h' },
@@ -649,6 +655,8 @@ function App() {
   const [telemetry, setTelemetry] = useState<TelemetryPoint[]>([])
   const [trafficEvents, setTrafficEvents] = useState<TrafficEvent[]>([])
   const [fontSize, setFontSize] = useState(16)
+  const [isStandby, setIsStandby] = useState(false)
+  const inactivityTimerRef = useRef<number | null>(null)
   const isAuthorized = Boolean(user)
 
   useEffect(() => {
@@ -665,11 +673,56 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!db || !isAuthorized) {
+    if (!isAuthorized) {
+      if (inactivityTimerRef.current !== null) {
+        window.clearTimeout(inactivityTimerRef.current)
+        inactivityTimerRef.current = null
+      }
       return () => undefined
     }
 
-    const unsubscribe = onSnapshot(collection(db, 'telemetry_heartbeat'), (snapshot) => {
+    const resetStandbyTimer = () => {
+      setIsStandby(false)
+      if (inactivityTimerRef.current !== null) {
+        window.clearTimeout(inactivityTimerRef.current)
+      }
+      inactivityTimerRef.current = window.setTimeout(() => {
+        setIsStandby(true)
+      }, INACTIVITY_STANDBY_MS)
+    }
+
+    const events: Array<keyof WindowEventMap> = ['scroll', 'wheel', 'pointerdown', 'touchstart', 'keydown']
+    events.forEach((eventName) => {
+      window.addEventListener(eventName, resetStandbyTimer, { passive: true })
+    })
+    document.addEventListener('change', resetStandbyTimer, true)
+    resetStandbyTimer()
+
+    return () => {
+      events.forEach((eventName) => {
+        window.removeEventListener(eventName, resetStandbyTimer)
+      })
+      document.removeEventListener('change', resetStandbyTimer, true)
+      if (inactivityTimerRef.current !== null) {
+        window.clearTimeout(inactivityTimerRef.current)
+        inactivityTimerRef.current = null
+      }
+    }
+  }, [isAuthorized])
+
+  useEffect(() => {
+    if (!db || !isAuthorized || isStandby) {
+      return () => undefined
+    }
+
+    const sinceIso = new Date(Date.now() - TELEMETRY_REALTIME_HOURS * 60 * 60 * 1000).toISOString()
+    const telemetryQuery = query(
+      collection(db, 'telemetry_heartbeat'),
+      where('timestamp', '>=', sinceIso),
+      orderBy('timestamp', 'asc'),
+    )
+
+    const unsubscribe = onSnapshot(telemetryQuery, (snapshot) => {
       const now = Date.now()
       const fallbackSpacing = 60 * 1000
       const points = snapshot.docs.map((docSnapshot, index) => {
@@ -680,9 +733,8 @@ function App() {
 
       const actualTimestampPoints = points.filter((point) => point.hasTimestamp)
       if (actualTimestampPoints.length > 0) {
-        const since = now - 24 * 60 * 60 * 1000
         actualTimestampPoints.sort((left, right) => left.timestamp.getTime() - right.timestamp.getTime())
-        setTelemetry(actualTimestampPoints.filter((point) => point.timestamp.getTime() >= since))
+        setTelemetry(actualTimestampPoints)
         return
       }
 
@@ -690,14 +742,20 @@ function App() {
     })
 
     return () => unsubscribe()
-  }, [isAuthorized])
+  }, [isAuthorized, isStandby])
 
   useEffect(() => {
-    if (!db || !isAuthorized) {
+    if (!db || !isAuthorized || isStandby) {
       return () => undefined
     }
 
-    const unsubscribe = onSnapshot(collection(db, 'traffic_events'), (snapshot) => {
+    const trafficQuery = query(
+      collection(db, 'traffic_events'),
+      orderBy('timestamp', 'desc'),
+      limit(10),
+    )
+
+    const unsubscribe = onSnapshot(trafficQuery, (snapshot) => {
       const events = snapshot.docs.map((docSnapshot) => {
         const raw = docSnapshot.data()
         return {
@@ -718,7 +776,7 @@ function App() {
     })
 
     return () => unsubscribe()
-  }, [isAuthorized])
+  }, [isAuthorized, isStandby])
 
   const latestTelemetry = telemetry.length > 0 ? telemetry[telemetry.length - 1] : null
   const radarStatus = inferConnectivity(latestTelemetry?.raw, radarStatusKeys, latestTelemetry?.timestamp ?? null)
@@ -801,6 +859,11 @@ function App() {
           <h1 className="text-2xl font-semibold text-slate-900 md:text-3xl">Live Operations View</h1>
         </div>
         <div className="flex items-center gap-2">
+          {isStandby && (
+            <p className="rounded-full bg-amber-100 px-3 py-1.5 text-sm font-medium text-amber-900">
+              Standby mode (no Firestore reads)
+            </p>
+          )}
           <div className="flex items-center gap-1 rounded-full border border-slate-300 bg-white px-1 py-0.5">
             <button
               type="button"
