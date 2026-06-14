@@ -25,6 +25,8 @@ dist-ssr
 
 *.json
 .env
+favicon.png
+gitpage.code-workspace
 
 !package.json
 !package-lock.json
