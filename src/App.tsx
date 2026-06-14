@@ -75,7 +75,7 @@ const trafficClassKeys = ['class', 'classification', 'vehicleClass', 'type']
 const trafficSpeedKeys = ['speed', 'speed_kph', 'speedKmh', 'velocity']
 const trafficDirectionKeys = ['direction', 'heading', 'dir']
 const trafficPeakKeys = ['peak_dba', 'peakDbA', 'peak', 'laeq_1m', 'peak_dB', 'peakdba']
-const TELEMETRY_REALTIME_HOURS = 24
+const ALL_RANGE_FALLBACK_MS = 30 * 24 * 60 * 60 * 1000
 const INACTIVITY_STANDBY_MS = 10 * 60 * 1000
 
 type MetricKey = 'temp' | 'hum' | 'pres' | 'gas' | 'laeq1m'
@@ -339,6 +339,13 @@ function filterTelemetryByRange(points: TelemetryPoint[], range: TimeRangeKey): 
   return points.filter((point) => point.timestamp >= start && point.timestamp < end)
 }
 
+function getRangeBoundsMs(range: TimeRangeKey, reference = new Date()): { start: number; end: number } {
+  const { start, end } = getTimeRangeBounds(range, reference)
+  const endMs = end ? end.getTime() : reference.getTime()
+  const startMs = start ? start.getTime() : endMs - ALL_RANGE_FALLBACK_MS
+  return { start: startMs, end: endMs }
+}
+
 // Y-axis: data-driven min-5 / max+5, nice tick intervals, at least 3 ticks
 const Y_STEP_CANDIDATES = [5000, 2500, 2000, 1000, 500, 250, 200, 100, 50, 25, 20, 10, 5, 2, 1]
 
@@ -397,13 +404,9 @@ const X_STEP_CANDIDATES_MS = [
   60 * 1000,
 ]
 
-function getTimeAxisTicks(points: TelemetryPoint[]): number[] {
-  if (points.length < 2) return points.map((p) => p.timestamp.getTime())
-
-  const startMs = points[0].timestamp.getTime()
-  const endMs = points[points.length - 1].timestamp.getTime()
+function getTimeAxisTicks(startMs: number, endMs: number): number[] {
   const spanMs = endMs - startMs
-  if (spanMs <= 0) return [startMs]
+  if (spanMs <= 0) return [startMs, endMs]
 
   let selectedStep = X_STEP_CANDIDATES_MS[X_STEP_CANDIDATES_MS.length - 1]
   for (const step of X_STEP_CANDIDATES_MS) {
@@ -538,6 +541,7 @@ function MetricChart({
 }: MetricChartProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<{ startX: number; startMs: number; endMs: number } | null>(null)
+  const rangeBounds = useMemo(() => getRangeBoundsMs(selectedRange), [selectedRange])
 
   const filteredByRange = useMemo(
     () => filterTelemetryByRange(telemetry, selectedRange),
@@ -546,37 +550,33 @@ function MetricChart({
 
   // X window for rendering
   const xWindow = useMemo(() => {
-    if (!zoomWindow || filteredByRange.length < 2) return null
-    const rangeStart = filteredByRange[0].timestamp.getTime()
-    const rangeEnd = filteredByRange[filteredByRange.length - 1].timestamp.getTime()
+    if (!zoomWindow) return null
     return {
-      start: Math.max(zoomWindow.start.getTime(), rangeStart),
-      end: Math.min(zoomWindow.end.getTime(), rangeEnd),
+      start: Math.max(zoomWindow.start.getTime(), rangeBounds.start),
+      end: Math.min(zoomWindow.end.getTime(), rangeBounds.end),
     }
-  }, [zoomWindow, filteredByRange])
+  }, [zoomWindow, rangeBounds])
+
+  const visibleStart = xWindow?.start ?? rangeBounds.start
+  const visibleEnd = xWindow?.end ?? rangeBounds.end
 
   const visibleData = useMemo(() => {
-    if (!xWindow) return filteredByRange
     return filteredByRange.filter(
-      (p) => p.timestamp.getTime() >= xWindow.start && p.timestamp.getTime() <= xWindow.end,
+      (p) => p.timestamp.getTime() >= visibleStart && p.timestamp.getTime() <= visibleEnd,
     )
-  }, [filteredByRange, xWindow])
+  }, [filteredByRange, visibleStart, visibleEnd])
 
   // Y-axis always based on the full range selection (not the zoom window)
   const axis = useMemo(() => getMetricAxis(filteredByRange, metric.key), [filteredByRange, metric.key])
-  const timeTicks = useMemo(() => getTimeAxisTicks(visibleData), [visibleData])
+  const timeTicks = useMemo(() => getTimeAxisTicks(visibleStart, visibleEnd), [visibleStart, visibleEnd])
 
   // ── Shift+scroll: zoom X axis ─────────────────────────────────────────────
   const handleWheel = useCallback(
     (event: WheelEvent) => {
       if (!event.shiftKey) return
       event.preventDefault()
-      const points = filteredByRange
-      if (points.length < 2) return
-      const rangeStart = points[0].timestamp.getTime()
-      const rangeEnd = points[points.length - 1].timestamp.getTime()
-      const currentStart = xWindow?.start ?? rangeStart
-      const currentEnd = xWindow?.end ?? rangeEnd
+      const currentStart = xWindow?.start ?? rangeBounds.start
+      const currentEnd = xWindow?.end ?? rangeBounds.end
       const centerMs = (currentStart + currentEnd) / 2
       const halfSpanMs = (currentEnd - currentStart) / 2
       const factor = event.deltaY > 0 ? 1.5 : 1 / 1.5
@@ -586,7 +586,7 @@ function MetricChart({
         end: new Date(centerMs + newHalfSpan),
       })
     },
-    [filteredByRange, xWindow],
+    [xWindow, rangeBounds, onZoomChange],
   )
 
   // ── Left-drag: pan X axis when zoomed ────────────────────────────────────
@@ -608,17 +608,13 @@ function MetricChart({
       const pxDelta = event.clientX - drag.startX
       // Pixels → milliseconds (negative: drag left shifts window right)
       const msDelta = -(pxDelta / containerWidth) * spanMs
-      const points = filteredByRange
-      if (points.length < 2) return
-      const rangeStart = points[0].timestamp.getTime()
-      const rangeEnd = points[points.length - 1].timestamp.getTime()
-      const newStart = Math.max(rangeStart, drag.startMs + msDelta)
-      const newEnd = Math.min(rangeEnd, drag.endMs + msDelta)
+      const newStart = Math.max(rangeBounds.start, drag.startMs + msDelta)
+      const newEnd = Math.min(rangeBounds.end, drag.endMs + msDelta)
       if (newEnd - newStart > 60_000) {
         onZoomChange({ start: new Date(newStart), end: new Date(newEnd) })
       }
     },
-    [filteredByRange],
+    [rangeBounds, onZoomChange],
   )
 
   const handleMouseUp = useCallback(() => { dragRef.current = null }, [])
@@ -638,9 +634,7 @@ function MetricChart({
     }
   }, [handleWheel, handleMouseDown, handleMouseMove, handleMouseUp])
 
-  const xDomain: [number, number] | ['auto', 'auto'] = timeTicks.length >= 2
-    ? [timeTicks[0], timeTicks[timeTicks.length - 1]]
-    : ['auto', 'auto']
+  const xDomain: [number, number] = [visibleStart, visibleEnd]
 
   return (
     <article
@@ -732,11 +726,7 @@ function TrafficHistogramChart({
   const dragRef = useRef<{ startX: number; startMs: number; endMs: number } | null>(null)
 
   const rangeBounds = useMemo(() => {
-    const { start, end } = getTimeRangeBounds(selectedRange)
-    return {
-      start: start ? start.getTime() : Date.now() - 30 * 24 * 60 * 60 * 1000,
-      end: end ? end.getTime() : Date.now(),
-    }
+    return getRangeBoundsMs(selectedRange)
   }, [selectedRange])
 
   const xWindow = useMemo(() => {
@@ -934,10 +924,12 @@ function App() {
       return () => undefined
     }
 
-    const sinceIso = new Date(Date.now() - TELEMETRY_REALTIME_HOURS * 60 * 60 * 1000).toISOString()
     const telemetryQuery = query(
       collection(db, 'telemetry_heartbeat'),
-      where('timestamp', '>=', sinceIso),
+      where('timestamp', '>=', (() => {
+        const { start } = getRangeBoundsMs(selectedRange)
+        return new Date(start).toISOString()
+      })()),
       orderBy('timestamp', 'asc'),
     )
 
@@ -961,7 +953,7 @@ function App() {
     })
 
     return () => unsubscribe()
-  }, [isAuthorized, isStandby])
+  }, [isAuthorized, isStandby, selectedRange])
 
   useEffect(() => {
     if (!db || !isAuthorized || isStandby) {
